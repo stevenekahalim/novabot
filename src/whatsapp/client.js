@@ -1,5 +1,8 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 const logger = require('../utils/logger');
 
 class WhatsAppClient {
@@ -7,6 +10,7 @@ class WhatsAppClient {
     this.client = null;
     this.isReady = false;
     this.targetGroupId = null;
+    this.latestQR = null;
   }
 
   async initialize() {
@@ -43,15 +47,46 @@ class WhatsAppClient {
 
   setupEventHandlers() {
     // QR Code generation
-    this.client.on('qr', (qr) => {
+    this.client.on('qr', async (qr) => {
+      this.latestQR = qr;
       logger.info('QR Code received. Scan with your phone:');
-      qrcode.generate(qr, { small: true });
+
+      // Show in terminal
+      qrcodeTerminal.generate(qr, { small: true });
       console.log('\n📱 Scan the QR code above with your WhatsApp');
+
+      // Save as PNG image
+      try {
+        const qrPath = path.join(__dirname, '../..', 'qr-code.png');
+        await QRCode.toFile(qrPath, qr, {
+          width: 400,
+          margin: 2,
+          color: {
+            dark: '#000000',
+            light: '#FFFFFF'
+          }
+        });
+        logger.info(`✅ QR code saved to ${qrPath}`);
+        logger.info('🌐 View QR code at: http://157.245.206.68:3000/qr');
+      } catch (error) {
+        logger.error('Error saving QR code image:', error);
+      }
     });
 
     // Authentication
     this.client.on('authenticated', () => {
       logger.info('✅ WhatsApp authenticated successfully');
+      this.latestQR = null; // Clear QR after auth
+
+      // Remove QR file
+      try {
+        const qrPath = path.join(__dirname, '../..', 'qr-code.png');
+        if (fs.existsSync(qrPath)) {
+          fs.unlinkSync(qrPath);
+        }
+      } catch (error) {
+        logger.error('Error removing QR file:', error);
+      }
     });
 
     this.client.on('auth_failure', (msg) => {
