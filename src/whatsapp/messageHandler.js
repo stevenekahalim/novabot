@@ -1,7 +1,7 @@
 const logger = require('../utils/logger');
 const MessageClassifier = require('../ai/classifier');
 const SupabaseClient = require('../database/supabase');
-const NotionSync = require('../notion/sync');
+// const NotionSync = require('../notion/sync'); // Disabled for MVP
 const ConversationMemory = require('../memory/conversationMemory');
 
 class MessageHandler {
@@ -9,7 +9,7 @@ class MessageHandler {
     this.whatsapp = whatsappClient;
     this.classifier = new MessageClassifier(openaiClient);
     this.supabase = new SupabaseClient();
-    this.notion = new NotionSync();
+    // this.notion = new NotionSync(); // Disabled for MVP - focus on WhatsApp + Supabase only
     this.memory = new ConversationMemory(this.supabase.getClient());
 
     this.setupListener();
@@ -284,8 +284,8 @@ class MessageHandler {
       whatsapp_message_id: messageId
     });
 
-    // Sync to Notion
-    await this.notion.syncProject(project);
+    // Sync to Notion (Disabled for MVP)
+    // await this.notion.syncProject(project);
 
     // Send confirmation
     await this.sendUpdateConfirmation(chatContext, project, classification);
