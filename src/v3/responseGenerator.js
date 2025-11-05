@@ -14,8 +14,16 @@ class ResponseGenerator {
       apiKey: process.env.OPENAI_API_KEY
     });
 
-    this.model = process.env.OPENAI_MODEL_RESPONSE || 'gpt-4-turbo';
+    // Model selection will be dynamic based on context size
+    this.defaultModel = process.env.OPENAI_MODEL_RESPONSE || 'gpt-4-turbo';
     this.maxTokens = 300; // Keep responses concise (max 5 lines)
+
+    // Model pricing (per 1K tokens) for cost estimation
+    this.modelPricing = {
+      'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+      'gpt-4o': { input: 0.0025, output: 0.01 },
+      'gpt-4-turbo': { input: 0.01, output: 0.03 }
+    };
   }
 
   /**
@@ -32,9 +40,16 @@ class ResponseGenerator {
       // Build the conversation history for OpenAI
       const messages = this._buildChatMessages(messageText, context, senderInfo);
 
+      // Smart model selection based on context size
+      const messageCount = context.messages.count;
+      const selectedModel = this._selectModel(messageCount);
+
+      logger.info(`[Token Monitor] Context size: ${messageCount} messages | Model: ${selectedModel}`);
+
       // Call OpenAI
+      const startTime = Date.now();
       const completion = await this.openai.chat.completions.create({
-        model: this.model,
+        model: selectedModel,
         messages: messages,
         max_tokens: this.maxTokens,
         temperature: 0.7,
@@ -42,7 +57,11 @@ class ResponseGenerator {
         frequency_penalty: 0.3
       });
 
+      const duration = Date.now() - startTime;
       const response = completion.choices[0].message.content.trim();
+
+      // Log token usage and cost
+      this._logTokenUsage(completion, selectedModel, duration, messageCount);
 
       logger.info(`Generated response (${response.length} chars): ${response.substring(0, 100)}...`);
 
@@ -54,6 +73,49 @@ class ResponseGenerator {
       // Fallback response if OpenAI fails
       return '⚠️ Error generating response. Try again.';
     }
+  }
+
+  /**
+   * Select the best model based on context size
+   * @private
+   */
+  _selectModel(messageCount) {
+    // Small context: Use fastest, cheapest model
+    if (messageCount < 50) {
+      return 'gpt-4o-mini';
+    }
+
+    // Medium context: Balanced model
+    if (messageCount < 200) {
+      return 'gpt-4o';
+    }
+
+    // Large context: Most capable model
+    return 'gpt-4-turbo';
+  }
+
+  /**
+   * Log token usage and estimated cost
+   * @private
+   */
+  _logTokenUsage(completion, model, duration, messageCount) {
+    const usage = completion.usage;
+    if (!usage) return;
+
+    const pricing = this.modelPricing[model] || this.modelPricing['gpt-4-turbo'];
+    const inputCost = (usage.prompt_tokens / 1000) * pricing.input;
+    const outputCost = (usage.completion_tokens / 1000) * pricing.output;
+    const totalCost = inputCost + outputCost;
+
+    logger.info(`[Token Monitor] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    logger.info(`[Token Monitor] Model: ${model}`);
+    logger.info(`[Token Monitor] Context: ${messageCount} messages`);
+    logger.info(`[Token Monitor] Input tokens: ${usage.prompt_tokens}`);
+    logger.info(`[Token Monitor] Output tokens: ${usage.completion_tokens}`);
+    logger.info(`[Token Monitor] Total tokens: ${usage.total_tokens}`);
+    logger.info(`[Token Monitor] Duration: ${duration}ms`);
+    logger.info(`[Token Monitor] Estimated cost: $${totalCost.toFixed(6)} (Input: $${inputCost.toFixed(6)}, Output: $${outputCost.toFixed(6)})`);
+    logger.info(`[Token Monitor] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   }
 
   /**
@@ -90,9 +152,10 @@ class ResponseGenerator {
     // 4. Context: Recent messages (short-term memory - conversation flow)
     if (context.messages.count > 0) {
       const messagesText = this._formatRecentMessages(context.messages.data);
+      const daysInfo = context.messages.daysBack ? `Last ${context.messages.daysBack} days` : 'All messages';
       messages.push({
         role: 'system',
-        content: `# CURRENT CONVERSATION (Last ${context.messages.daysBack} days)\n\n${messagesText}`
+        content: `# CURRENT CONVERSATION (${daysInfo})\n\n${messagesText}`
       });
     }
 

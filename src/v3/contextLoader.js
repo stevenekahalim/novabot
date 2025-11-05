@@ -19,8 +19,8 @@ class ContextLoader {
    */
   async loadFullContext(chatId, options = {}) {
     const {
-      messageDaysBack = 7,      // Look back 7 days for messages
-      messageLimit = 100,        // Max 100 recent messages
+      messageDaysBack = null,    // null = ALL messages (no time limit)
+      messageLimit = null,        // null = no limit on message count
       digestDaysBack = 30,       // 30 days of daily digests
       hourlyNotesHoursBack = 24  // Last 24 hours of hourly notes
     } = options;
@@ -66,24 +66,36 @@ class ContextLoader {
   }
 
   /**
-   * Load recent raw messages
+   * Load recent raw messages (or ALL messages if daysBack/limit are null)
    * @private
    */
   async _loadRecentMessages(chatId, daysBack, limit) {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - daysBack);
-
     try {
-      const { data, error } = await this.supabase
+      let query = this.supabase
         .from('messages_v3')
         .select('id, message_text, sender_name, sender_number, timestamp, mentioned_nova, is_reply, has_media')
-        .eq('chat_id', chatId)
-        .gte('timestamp', cutoffDate.toISOString())
-        .order('timestamp', { ascending: true })
-        .limit(limit);
+        .eq('chat_id', chatId);
+
+      // Only apply time filter if daysBack is specified
+      if (daysBack !== null) {
+        const cutoffDate = new Date();
+        cutoffDate.setDate(cutoffDate.getDate() - daysBack);
+        query = query.gte('timestamp', cutoffDate.toISOString());
+      }
+
+      // Always order by timestamp
+      query = query.order('timestamp', { ascending: true });
+
+      // Only apply limit if specified
+      if (limit !== null) {
+        query = query.limit(limit);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
 
+      logger.info(`Loaded ${data ? data.length : 0} messages for chat ${chatId}`);
       return data || [];
     } catch (error) {
       logger.error(`Error loading recent messages for ${chatId}:`, error);
