@@ -2,15 +2,19 @@ const logger = require('../utils/logger');
 const MessageClassifier = require('../ai/classifier');
 const SupabaseClient = require('../database/supabase');
 // const NotionSync = require('../notion/sync'); // Disabled for MVP
-const ConversationMemory = require('../memory/conversationMemory');
+const EnhancedMemory = require('../memory/enhancedMemory');
+const ConversationalCore = require('./conversationalCore');
+const RESPONSE_PROMPT = require('../prompts/response');
 
 class MessageHandler {
   constructor(whatsappClient, openaiClient) {
     this.whatsapp = whatsappClient;
+    this.openai = openaiClient;
     this.classifier = new MessageClassifier(openaiClient);
     this.supabase = new SupabaseClient();
     // this.notion = new NotionSync(); // Disabled for MVP - focus on WhatsApp + Supabase only
-    this.memory = new ConversationMemory(this.supabase.getClient());
+    this.memory = new EnhancedMemory(this.supabase.getClient(), openaiClient);
+    this.conversational = new ConversationalCore(this.supabase, openaiClient);
 
     this.setupListener();
   }
@@ -63,17 +67,20 @@ class MessageHandler {
     // Even "ok", "noted", "Manado" are valuable for conversation understanding
 
     // ========================================
-    // CONVERSATION MEMORY: Load sliding window context
-    // (30 min raw messages + older session summaries)
+    // ENHANCED MEMORY: Load context for message understanding
+    // (Recent messages + sessions + project facts)
     // ========================================
-    const context = await this.memory.getSlidingWindowContext(chatId, 30);
-    const conversationHistory = context.recentMessages;
-    const historicalSessions = context.historicalSessions;
+    // Get initial context without knowing project yet
+    const context = await this.memory.getContextForQuery(messageText, null, chatId);
+    const conversationHistory = context.recentMessages || [];
+    const historicalSessions = context.recentSessions || [];
+    const projectFacts = context.projectFacts || [];
 
-    const projectContext = this.memory.extractProjectContext(conversationHistory);
+    // Extract project context from conversation history for classification
+    const projectContext = this.extractProjectFromHistory(conversationHistory);
 
     if (projectContext) {
-      logger.info(`📚 Project context from history: ${projectContext.projectName} (mentioned ${projectContext.confidence * 100}% confident)`);
+      logger.info(`📚 Project context from history: ${projectContext.projectName} (${projectContext.mentions} mentions)`);
     }
 
     // Detect if message is a document/PDF attachment
@@ -98,12 +105,8 @@ class MessageHandler {
     if (!this.classifier.shouldProcess(classification)) {
       logger.debug('Message classified as casual or low confidence, skipping');
 
-      // Still save to conversation history (for future context)
-      await this.memory.saveMessage(chatId, chatName, isGroup ? 'GROUP' : 'PRIVATE', {
-        text: messageText,
-        author: author,
-        classification: 'CASUAL'
-      });
+      // Still save to enhanced memory (with comprehensive extraction)
+      await this.memory.saveMessage(message, chatName, isGroup ? 'GROUP' : 'PRIVATE');
 
       return;
     }
@@ -113,17 +116,10 @@ class MessageHandler {
     await this.processMessage(classification, messageText, author, message.id.id, chatContext);
 
     // ========================================
-    // CONVERSATION MEMORY: Save this message
+    // ENHANCED MEMORY: Save message with comprehensive extraction
+    // (Projects, people, numbers, dates, decisions, facts - all extracted)
     // ========================================
-    await this.memory.saveMessage(chatId, chatName, isGroup ? 'GROUP' : 'PRIVATE', {
-      text: messageText,
-      author: author,
-      project: classification.project_name,
-      classification: classification.type
-    });
-
-    // Refresh TTL for active conversation
-    await this.memory.refreshConversationTTL(chatId);
+    await this.memory.saveMessage(message, chatName, isGroup ? 'GROUP' : 'PRIVATE');
   }
 
   async processMessage(classification, text, author, messageId, chatContext) {
@@ -234,6 +230,16 @@ class MessageHandler {
       // Update existing project in the same context
       const existingData = project.data || {};
       let existingChecklist = existingData.checklist || [];
+
+      // Normalize checklist format: convert object to array if needed
+      if (existingChecklist && typeof existingChecklist === 'object' && !Array.isArray(existingChecklist)) {
+        logger.info('Converting legacy checklist object to array format');
+        existingChecklist = Object.entries(existingChecklist).map(([key, value]) => ({
+          item: key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+          status: value ? 'done' : 'pending',
+          updated_at: new Date().toISOString()
+        }));
+      }
 
       // If this is a PRE_OPENING project but has no checklist, initialize it
       if (contextType === 'pre_opening' && existingChecklist.length === 0) {
@@ -417,29 +423,20 @@ Return ONLY valid JSON array, no explanation.`;
   }
 
   async handleQuestion(classification, text, author, chatContext) {
-    const { chat } = chatContext;
+    const { chat, chatId } = chatContext;
     logger.info('Handling question');
 
-    const projectName = classification.project_name;
+    // Load conversation context (THIS IS THE FIX!)
+    const context = await this.conversational.loadConversationContext(chatId, text);
 
-    // Check if user is asking for a recap/summary of all projects
-    const isRecapRequest = text.toLowerCase().includes('recap') ||
-                           text.toLowerCase().includes('what did you') ||
-                           text.toLowerCase().includes('show me') ||
-                           text.toLowerCase().includes('summary');
+    // Generate conversational response instead of template
+    const response = await this.conversational.generateResponse(
+      text,
+      context,
+      'QUESTION'
+    );
 
-    if (projectName) {
-      // Question about specific project - report shows current phase
-      const status = await this.supabase.getProjectStatus(projectName);
-      await chat.sendMessage(status);
-    } else if (isRecapRequest) {
-      // User wants full recap using multi-context report templates
-      const recap = await this.supabase.generateRecap();
-      await chat.sendMessage(recap);
-    } else {
-      // General question - be direct
-      await chat.sendMessage('Project mana? Sebut nama project buat status check.\n\nOr type "recap" buat overview semua.');
-    }
+    await chat.sendMessage(response);
   }
 
   async handleBlocker(classification, text, author, chatContext) {
@@ -518,63 +515,62 @@ Return ONLY valid JSON array, no explanation.`;
   }
 
   async generateIntelligentConfirmation(project, classification, isPrivate, isGroup) {
-    // Build context for AI
-    const contextType = project.context_type || 'unknown';
+    // Build context for AI using Nova V2 prompts
+    const contextType = project.context_type || 'pre_opening';
     const updateText = classification.key_info;
     const projectData = project.data || {};
+    const checklist = projectData.checklist || [];
 
-    // Check missing info
-    const missingInfo = [];
-    if (!project.pic || project.pic === 'Unassigned') missingInfo.push('PIC');
-    if (!project.deadline && project.context_type === 'negotiation') missingInfo.push('deadline');
-    if (!project.next_action) missingInfo.push('next action');
+    // Calculate checklist progress for PRE_OPENING projects
+    let checklistSummary = '';
+    if (contextType === 'pre_opening' && checklist.length > 0) {
+      const doneCount = checklist.filter(item => item.status === 'done').length;
+      const totalCount = checklist.length;
+      const doneItems = checklist.filter(item => item.status === 'done').map(item => `• ${item.item}`).join('\n');
+      const pendingItems = checklist.filter(item => item.status === 'pending').map(item => `• ${item.item}`).join('\n');
 
-    const prompt = `You are Nova, an assertive project manager for APEX padel court construction company.
+      checklistSummary = `
+CHECKLIST PROGRESS: ${doneCount}/${totalCount} items
 
-PROJECT: ${project.name}
-PHASE: ${contextType.toUpperCase()}
-UPDATE RECEIVED: "${updateText}"
-CURRENT STATUS: ${project.status || 'unknown'}
+✅ Done:
+${doneItems || '(none)'}
 
-${missingInfo.length > 0 ? `MISSING INFO: ${missingInfo.join(', ')}` : ''}
+⏳ Pending:
+${pendingItems || '(all done!)'}`;
+    }
 
-Generate a SHORT (2-3 sentences max), assertive confirmation message that:
-1. Acknowledges what was just updated (be specific, not generic)
-2. Understands the context and what naturally comes NEXT in this phase
-3. Asks a pointed, specific follow-up question (not generic "what's next?")
-4. Sounds like a leader who understands construction project management
-5. Uses casual Indonesian/English mix when appropriate
+    // Build user message with project context
+    const userPrompt = `Current message: "${updateText}"
 
-${missingInfo.length > 0 && isGroup ? 'IMPORTANT: Demand the missing info assertively. Tag @Eka @Hendry @Win and ask who is handling this.' : ''}
+PROJECT CONTEXT:
+- Name: ${project.name}
+- Phase: ${contextType.toUpperCase()}
+- Status: ${project.status || 'active'}
+${checklistSummary}
 
-EXAMPLES OF GOOD RESPONSES:
-- "Rental signed and PT set up - legal foundation solid. With architect onboard, you're moving into design. Get 3 contractor bids by when?"
-- "80% construction done means you're in final stretch. MEP and amenities - target completion date?"
-- "Payment terms being finalized. Grace period structure looks like? And who's the local investor requirement?"
-
-BAD RESPONSES (avoid these):
-- "Great progress! Keep it up!" (too generic)
-- "Next milestone apa?" (asking what's next shows you don't know the process)
-- "Update received. What else?" (sounds like note-taking staff)
-
-${isPrivate ? '\nADD AT END: Brief status summary (Phase, PIC, key data point)' : ''}
-
-Respond in plain text, no markdown formatting except *bold* for project name.`;
+Generate Nova's response to confirm this update.`;
 
     try {
       const aiResponse = await this.classifier.openai.chatWithRetry([
-        { role: 'system', content: 'You are Nova, an assertive construction project manager. Be concise, specific, and show you understand the workflow.' },
-        { role: 'user', content: prompt }
-      ]);
+        { role: 'system', content: RESPONSE_PROMPT },
+        { role: 'user', content: userPrompt }
+      ], {
+        temperature: 0.7,
+        max_tokens: 150  // Keep responses concise (5 lines max)
+      });
 
-      // Add context label
-      const contextLabel = `[${contextType.toUpperCase()}]`;
-      return `✅ ${contextLabel} *${project.name}*\n\n${aiResponse.trim()}`;
+      // Nova V2: No context label prefix, let AI handle formatting
+      return aiResponse.trim();
     } catch (error) {
       logger.error('Error generating intelligent confirmation:', error);
 
-      // Fallback to simple confirmation
-      return `✅ [${contextType.toUpperCase()}] *${project.name}*\n\nUpdate logged: ${updateText}\n\n${missingInfo.length > 0 ? `⚠️ Missing: ${missingInfo.join(', ')}` : 'What\'s the next critical milestone?'}`;
+      // Fallback to simple Nova V2 style confirmation
+      if (contextType === 'pre_opening' && checklist.length > 0) {
+        const doneCount = checklist.filter(item => item.status === 'done').length;
+        return `✅ ${project.name}: ${updateText}\n${doneCount}/5 complete. Next?`;
+      }
+
+      return `✅ ${project.name}\n${updateText}\nNext?`;
     }
   }
 
@@ -665,6 +661,30 @@ Respond in plain text, no markdown formatting except *bold* for project name.`;
     }
 
     return false;
+  }
+
+  extractProjectFromHistory(conversationHistory) {
+    // Extract project mentions from recent conversation
+    const projectNames = ['Manado', 'Jakarta', 'Palembang']; // TODO: get from database
+    const mentions = {};
+
+    conversationHistory.forEach(msg => {
+      projectNames.forEach(project => {
+        if (msg.message_text && msg.message_text.toLowerCase().includes(project.toLowerCase())) {
+          mentions[project] = (mentions[project] || 0) + 1;
+        }
+      });
+    });
+
+    // Return most mentioned project
+    const entries = Object.entries(mentions);
+    if (entries.length === 0) return null;
+
+    entries.sort((a, b) => b[1] - a[1]);
+    return {
+      projectName: entries[0][0],
+      mentions: entries[0][1]
+    };
   }
 }
 

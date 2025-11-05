@@ -8,7 +8,12 @@
     "dev": "node src/index.js",
     "test": "echo \"No tests yet\" && exit 0"
   },
-  "keywords": ["whatsapp", "ai", "assistant", "project-management"],
+  "keywords": [
+    "whatsapp",
+    "ai",
+    "assistant",
+    "project-management"
+  ],
   "author": "APEX Team",
   "license": "MIT",
   "type": "commonjs",
@@ -19,8 +24,12 @@
     "express": "^5.1.0",
     "node-cron": "^4.2.1",
     "openai": "^6.7.0",
+    "pg": "^8.16.3",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.34.1",
     "winston": "^3.18.3"
+  },
+  "devDependencies": {
+    "@supabase/mcp-server-supabase": "^0.5.9"
   }
 }

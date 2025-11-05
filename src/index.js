@@ -11,12 +11,17 @@ const ConversationMemory = require('./memory/conversationMemory');
 const SessionSummarizer = require('./jobs/sessionSummarizer');
 const EnhancedMemory = require('./memory/enhancedMemory');
 const Scheduler = require('./scheduler');
+const { initializeV3 } = require('./v3');
+
+// Check which version to use
+const USE_V3 = process.env.USE_V3 === 'true';
 
 // Banner
 console.log(`
 ╔═══════════════════════════════════════╗
 ║     APEX ASSISTANT v1.0.0             ║
 ║     WhatsApp AI Agent                 ║
+║     Architecture: ${USE_V3 ? 'V3 (Pure Conversational)' : 'V2 (Legacy)'} ║
 ║     Starting up...                    ║
 ╚═══════════════════════════════════════╝
 `);
@@ -33,6 +38,10 @@ class ApexAssistant {
     this.scheduler = null;
     this.healthServer = null;
     this.startTime = Date.now();
+
+    // V3-specific properties
+    this.useV3 = USE_V3;
+    this.v3 = null;
   }
 
   async start() {
@@ -62,30 +71,81 @@ class ApexAssistant {
       logger.info('Initializing Supabase...');
       this.supabase = new SupabaseClient();
 
-      // Initialize enhanced memory system
-      logger.info('Initializing enhanced memory system...');
-      this.enhancedMemory = new EnhancedMemory(this.supabase.getClient(), this.openai);
+      if (this.useV3) {
+        // ============================================
+        // V3 INITIALIZATION (Pure Conversational)
+        // ============================================
+        logger.info('🔷 Using V3 Architecture (Pure Conversational)');
 
-      // Initialize legacy conversation memory (for backward compatibility)
-      this.conversationMemory = new ConversationMemory(this.supabase.getClient());
+        // Initialize V3 system
+        logger.info('Initializing V3 modules...');
+        this.v3 = initializeV3(this.supabase);
 
-      // Initialize legacy session summarizer (for backward compatibility)
-      logger.info('Initializing session summarizer...');
-      this.sessionSummarizer = new SessionSummarizer(this.conversationMemory, this.openai);
-      this.sessionSummarizer.start();
+        // Override message handler to use V3
+        const originalOn = this.whatsapp.client.on.bind(this.whatsapp.client);
+        originalOn('message_create', async (message) => {
+          // Skip own messages
+          if (message.fromMe) return;
 
-      // Initialize scheduler for automated jobs
-      logger.info('Initializing scheduler (3 AM digests, session compilation)...');
-      this.scheduler = new Scheduler(this.supabase.getClient(), this.openai, this.whatsapp);
-      this.scheduler.start();
+          try {
+            const chat = await message.getChat();
+            const chatContext = {
+              name: chat.name || message.from,
+              isGroup: chat.isGroup
+            };
 
-      logger.info('✅ APEX Assistant is running!');
-      logger.info('📱 WhatsApp: Connected');
-      logger.info('🤖 OpenAI: Ready');
-      logger.info('🧠 Enhanced Memory: Ready');
-      logger.info('📊 Session Summarizer: Running');
-      logger.info('🕐 Scheduler: Running (3 AM digest, hourly session check)');
-      logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
+            const result = await this.v3.handleMessage(message, chatContext);
+
+            if (result.shouldReply && result.response) {
+              await message.reply(result.response);
+            }
+          } catch (error) {
+            logger.error('[V3] Error handling message:', error);
+          }
+        });
+
+        // Start V3 background jobs
+        logger.info('Starting V3 jobs (hourly notes, daily digests)...');
+        this.v3.startJobs();
+
+        logger.info('✅ APEX Assistant is running (V3)!');
+        logger.info('📱 WhatsApp: Connected');
+        logger.info('🤖 OpenAI: Ready');
+        logger.info('🔷 V3 Message Handler: Active');
+        logger.info('🕐 V3 Jobs: Running (hourly notes, daily digests)');
+        logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
+
+      } else {
+        // ============================================
+        // V2 INITIALIZATION (Legacy)
+        // ============================================
+        logger.info('🔶 Using V2 Architecture (Legacy)');
+
+        // Initialize enhanced memory system
+        logger.info('Initializing enhanced memory system...');
+        this.enhancedMemory = new EnhancedMemory(this.supabase.getClient(), this.openai);
+
+        // Initialize legacy conversation memory (for backward compatibility)
+        this.conversationMemory = new ConversationMemory(this.supabase.getClient());
+
+        // Initialize legacy session summarizer (for backward compatibility)
+        logger.info('Initializing session summarizer...');
+        this.sessionSummarizer = new SessionSummarizer(this.conversationMemory, this.openai);
+        this.sessionSummarizer.start();
+
+        // Initialize scheduler for automated jobs
+        logger.info('Initializing scheduler (3 AM digests, session compilation)...');
+        this.scheduler = new Scheduler(this.supabase.getClient(), this.openai, this.whatsapp);
+        this.scheduler.start();
+
+        logger.info('✅ APEX Assistant is running (V2)!');
+        logger.info('📱 WhatsApp: Connected');
+        logger.info('🤖 OpenAI: Ready');
+        logger.info('🧠 Enhanced Memory: Ready');
+        logger.info('📊 Session Summarizer: Running');
+        logger.info('🕐 Scheduler: Running (3 AM digest, hourly session check)');
+        logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
+      }
 
       // Setup graceful shutdown
       this.setupShutdownHandlers();
@@ -100,7 +160,7 @@ class ApexAssistant {
     const required = [
       'OPENAI_API_KEY',
       'SUPABASE_URL',
-      'SUPABASE_KEY'
+      'SUPABASE_SERVICE_KEY'  // Changed from SUPABASE_KEY - backend requires service_role key
     ];
 
     const missing = required.filter(key => !process.env[key]);
@@ -234,7 +294,13 @@ class ApexAssistant {
       logger.info(`\n${signal} received. Shutting down gracefully...`);
 
       try {
-        // Stop scheduler
+        // Stop V3 jobs if running
+        if (this.useV3 && this.v3) {
+          logger.info('Stopping V3 jobs...');
+          this.v3.stopJobs();
+        }
+
+        // Stop V2 scheduler if running
         if (this.scheduler) {
           logger.info('Stopping scheduler...');
           this.scheduler.stop();

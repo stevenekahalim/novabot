@@ -63,12 +63,16 @@ class OpenAIClient {
     }
   }
 
-  async chatWithRetry(messages, model = this.modelClassification, maxRetries = 3) {
+  async chatWithRetry(messages, options = {}, maxRetries = 3) {
+    // Support both old signature (messages, model, maxRetries) and new (messages, options, maxRetries)
+    const model = typeof options === 'string' ? options : (options.model || this.modelClassification);
+    const opts = typeof options === 'string' ? {} : options;
+
     let lastError;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        return await this.chat(messages, model);
+        return await this.chat(messages, model, opts);
       } catch (error) {
         lastError = error;
         logger.warn(`OpenAI attempt ${attempt} failed: ${error.message}`);

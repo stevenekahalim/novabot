@@ -5,11 +5,18 @@ const reportTemplates = require('../reports/templates');
 class SupabaseClient {
   constructor() {
     const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY;
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
 
-    if (!supabaseUrl || !supabaseKey) {
-      throw new Error('Supabase credentials missing in environment variables');
+    if (!supabaseUrl) {
+      throw new Error('SUPABASE_URL is required in environment variables');
     }
+
+    if (!supabaseKey) {
+      throw new Error('SUPABASE_SERVICE_KEY is required for backend operations. Get it from Supabase dashboard → Settings → API → service_role key');
+    }
+
+    // Log which key type is being used (first 20 chars for security)
+    logger.info(`Using Supabase service_role key: ${supabaseKey.substring(0, 20)}...`);
 
     this.client = createClient(supabaseUrl, supabaseKey);
     this.isConnected = false;
