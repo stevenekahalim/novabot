@@ -1,6 +1,6 @@
 /**
  * V3 Context Loader
- * Loads conversational context from messages_v3, hourly_notes, and daily_digests_v3
+ * Loads conversational context from messages_v3 and hourly_notes
  * Philosophy: Pure context retrieval - no extraction, just raw data for AI to interpret
  */
 
@@ -15,24 +15,22 @@ class ContextLoader {
    * Load full conversation context for AI to process
    * @param {string} chatId - WhatsApp chat ID
    * @param {Object} options - Optional parameters
-   * @returns {Object} Full context with messages, hourly notes, and daily digests
+   * @returns {Object} Full context with messages and hourly notes
    */
   async loadFullContext(chatId, options = {}) {
     const {
       messageDaysBack = null,    // null = ALL messages (no time limit)
       messageLimit = null,        // null = no limit on message count
-      digestDaysBack = 30,       // 30 days of daily digests
       hourlyNotesHoursBack = 24  // Last 24 hours of hourly notes
     } = options;
 
     logger.info(`Loading V3 context for chat: ${chatId}`);
 
     try {
-      // Load all three context sources in parallel for speed
-      const [messages, hourlyNotes, dailyDigests] = await Promise.all([
+      // Load both context sources in parallel for speed
+      const [messages, hourlyNotes] = await Promise.all([
         this._loadRecentMessages(chatId, messageDaysBack, messageLimit),
-        this._loadHourlyNotes(chatId, hourlyNotesHoursBack),
-        this._loadDailyDigests(chatId, digestDaysBack)
+        this._loadHourlyNotes(chatId, hourlyNotesHoursBack)
       ]);
 
       const context = {
@@ -47,15 +45,10 @@ class ContextLoader {
           data: hourlyNotes,
           count: hourlyNotes.length,
           hoursBack: hourlyNotesHoursBack
-        },
-        dailyDigests: {
-          data: dailyDigests,
-          count: dailyDigests.length,
-          daysBack: digestDaysBack
         }
       };
 
-      logger.info(`Context loaded: ${messages.length} messages, ${hourlyNotes.length} hourly notes, ${dailyDigests.length} daily digests`);
+      logger.info(`Context loaded: ${messages.length} messages, ${hourlyNotes.length} hourly notes`);
 
       return context;
 
@@ -66,39 +59,37 @@ class ContextLoader {
   }
 
   /**
-   * Load recent raw messages (or ALL messages if daysBack/limit are null)
+   * Load knowledge base recap (replaces loading raw messages)
    * @private
    */
   async _loadRecentMessages(chatId, daysBack, limit) {
     try {
-      let query = this.supabase
-        .from('messages_v3')
-        .select('id, message_text, sender_name, sender_number, timestamp, mentioned_nova, is_reply, has_media')
-        .eq('chat_id', chatId);
+      // Load from knowledge_base instead of raw messages
+      logger.info('Loading from knowledge_base (structured recap)...');
 
-      // Only apply time filter if daysBack is specified
-      if (daysBack !== null) {
-        const cutoffDate = new Date();
-        cutoffDate.setDate(cutoffDate.getDate() - daysBack);
-        query = query.gte('timestamp', cutoffDate.toISOString());
-      }
-
-      // Always order by timestamp
-      query = query.order('timestamp', { ascending: true });
-
-      // Only apply limit if specified
-      if (limit !== null) {
-        query = query.limit(limit);
-      }
-
-      const { data, error } = await query;
+      const { data, error } = await this.supabase
+        .from('knowledge_base')
+        .select('id, date, topic, content, tags')
+        .order('id', { ascending: true });
 
       if (error) throw error;
 
-      logger.info(`Loaded ${data ? data.length : 0} messages for chat ${chatId}`);
-      return data || [];
+      // Convert knowledge base format to message-like format for compatibility
+      const formattedData = data.map(row => ({
+        id: row.id,
+        message_text: `[${row.date}] ${row.topic}: ${row.content}`,
+        tags: row.tags || '',
+        sender_name: 'Knowledge Base',
+        timestamp: row.date,
+        mentioned_nova: false,
+        is_reply: false,
+        has_media: false
+      }));
+
+      logger.info(`Loaded ${formattedData.length} knowledge base entries (covering 3,785 original messages)`);
+      return formattedData;
     } catch (error) {
-      logger.error(`Error loading recent messages for ${chatId}:`, error);
+      logger.error(`Error loading knowledge base:`, error);
       return [];
     }
   }
@@ -128,31 +119,6 @@ class ContextLoader {
     }
   }
 
-  /**
-   * Load daily digests
-   * @private
-   */
-  async _loadDailyDigests(chatId, daysBack) {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - daysBack);
-    const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
-
-    try {
-      const { data, error } = await this.supabase
-        .from('daily_digests_v3')
-        .select('id, digest_date, summary_text, projects_discussed, key_decisions, blockers_identified, financial_mentions, message_count, participants')
-        .eq('chat_id', chatId)
-        .gte('digest_date', cutoffDateStr)
-        .order('digest_date', { ascending: false });
-
-      if (error) throw error;
-
-      return data || [];
-    } catch (error) {
-      logger.error(`Error loading daily digests for ${chatId}:`, error);
-      return [];
-    }
-  }
 
   /**
    * Load context for a specific time range (useful for generating hourly/daily summaries)
@@ -187,17 +153,15 @@ class ContextLoader {
    */
   async getChatStats(chatId) {
     try {
-      const [messageCount, hourlyCount, digestCount] = await Promise.all([
+      const [messageCount, hourlyCount] = await Promise.all([
         this._countMessages(chatId),
-        this._countHourlyNotes(chatId),
-        this._countDailyDigests(chatId)
+        this._countHourlyNotes(chatId)
       ]);
 
       return {
         chatId,
         totalMessages: messageCount,
         totalHourlyNotes: hourlyCount,
-        totalDailyDigests: digestCount,
         checkedAt: new Date().toISOString()
       };
     } catch (error) {
@@ -218,15 +182,6 @@ class ContextLoader {
   async _countHourlyNotes(chatId) {
     const { count, error } = await this.supabase
       .from('hourly_notes')
-      .select('id', { count: 'exact', head: true })
-      .eq('chat_id', chatId);
-
-    return error ? 0 : count || 0;
-  }
-
-  async _countDailyDigests(chatId) {
-    const { count, error } = await this.supabase
-      .from('daily_digests_v3')
       .select('id', { count: 'exact', head: true })
       .eq('chat_id', chatId);
 

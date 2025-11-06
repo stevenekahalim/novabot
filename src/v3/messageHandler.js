@@ -49,11 +49,11 @@ class MessageHandler {
 
       logger.info('[V3] Mentioned or DM, generating response...');
 
-      // 3. Load full conversation context
-      const context = await this.contextLoader.loadFullContext(chatId, {
-        messageDaysBack: 7,
-        messageLimit: 100,
-        digestDaysBack: 30,
+      // 3. Load full conversation context (ALWAYS from group chat - all 3,785 messages)
+      const GROUP_CHAT_ID = '120363420201458845@g.us'; // Apex Sports Lab group
+      const context = await this.contextLoader.loadFullContext(GROUP_CHAT_ID, {
+        messageDaysBack: null,     // null = ALL messages (no date filter)
+        messageLimit: null,        // null = no message count limit
         hourlyNotesHoursBack: 24
       });
 

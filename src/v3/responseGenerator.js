@@ -131,16 +131,7 @@ class ResponseGenerator {
       content: NOVA_PROMPT
     });
 
-    // 2. Context: Daily digests (long-term memory)
-    if (context.dailyDigests.count > 0) {
-      const digestsText = this._formatDailyDigests(context.dailyDigests.data);
-      messages.push({
-        role: 'system',
-        content: `# HISTORICAL CONTEXT (Last ${context.dailyDigests.daysBack} days)\n\n${digestsText}`
-      });
-    }
-
-    // 3. Context: Hourly notes (medium-term memory)
+    // 2. Context: Hourly notes (medium-term memory)
     if (context.hourlyNotes.count > 0) {
       const hourlyText = this._formatHourlyNotes(context.hourlyNotes.data);
       messages.push({
@@ -149,17 +140,35 @@ class ResponseGenerator {
       });
     }
 
-    // 4. Context: Recent messages (short-term memory - conversation flow)
+    // 3. Context: Recent messages (short-term memory - conversation flow)
     if (context.messages.count > 0) {
       const messagesText = this._formatRecentMessages(context.messages.data);
-      const daysInfo = context.messages.daysBack ? `Last ${context.messages.daysBack} days` : 'All messages';
-      messages.push({
-        role: 'system',
-        content: `# CURRENT CONVERSATION (${daysInfo})\n\n${messagesText}`
-      });
+
+      // Check if this is knowledge base data
+      const isKnowledgeBase = context.messages.data.length > 0 &&
+                             context.messages.data[0].sender_name === 'Knowledge Base';
+
+      if (isKnowledgeBase) {
+        messages.push({
+          role: 'system',
+          content: `# KNOWLEDGE BASE (CSV with 459 entries from 3,785+ messages)
+
+Format: #id | date | topic | content | tags
+
+${messagesText}
+
+Instructions: Use the retrieval rules and synthesis approach from your persona. Search across multiple rows, score matches, and cite row IDs in your response.`
+        });
+      } else {
+        const daysInfo = context.messages.daysBack ? `Last ${context.messages.daysBack} days` : 'All messages';
+        messages.push({
+          role: 'system',
+          content: `# CURRENT CONVERSATION (${daysInfo})\n\n${messagesText}`
+        });
+      }
     }
 
-    // 5. Current message from user
+    // 4. Current message from user
     const senderName = senderInfo.name || senderInfo.sender_name || 'User';
     messages.push({
       role: 'user',
@@ -167,33 +176,6 @@ class ResponseGenerator {
     });
 
     return messages;
-  }
-
-  /**
-   * Format daily digests for context
-   * @private
-   */
-  _formatDailyDigests(digests) {
-    return digests.map(digest => {
-      const parts = [
-        `## ${digest.digest_date}`,
-        digest.summary_text
-      ];
-
-      if (digest.projects_discussed && digest.projects_discussed.length > 0) {
-        parts.push(`Projects: ${digest.projects_discussed.join(', ')}`);
-      }
-
-      if (digest.key_decisions && digest.key_decisions.length > 0) {
-        parts.push(`Key Decisions:\n${digest.key_decisions.map(d => `  - ${d}`).join('\n')}`);
-      }
-
-      if (digest.blockers_identified && digest.blockers_identified.length > 0) {
-        parts.push(`Blockers:\n${digest.blockers_identified.map(b => `  - ${b}`).join('\n')}`);
-      }
-
-      return parts.join('\n');
-    }).join('\n\n');
   }
 
   /**
@@ -231,6 +213,26 @@ class ResponseGenerator {
    * @private
    */
   _formatRecentMessages(messages) {
+    // Check if this is knowledge base data (formatted messages from contextLoader)
+    const isKnowledgeBase = messages.length > 0 &&
+                           messages[0].sender_name === 'Knowledge Base';
+
+    if (isKnowledgeBase) {
+      // Format as CSV-style for better Nova parsing
+      return messages.map(msg => {
+        // Extract id, date, topic, content from the formatted message_text
+        // Format: "[date] topic: content"
+        const match = msg.message_text.match(/^\[([^\]]+)\] ([^:]+): (.+)$/);
+        if (match) {
+          const [, date, topic, content] = match;
+          const tags = msg.tags || '';
+          return `#${msg.id} | ${date} | ${topic} | ${content} | ${tags}`;
+        }
+        return `#${msg.id} | ${msg.message_text}`;
+      }).join('\n');
+    }
+
+    // Original formatting for raw messages
     return messages.map(msg => {
       const time = new Date(msg.timestamp).toLocaleString('id-ID', {
         hour: '2-digit',

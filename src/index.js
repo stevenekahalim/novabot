@@ -3,25 +3,21 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const logger = require('./utils/logger');
+
+// Core modules
 const WhatsAppClient = require('./whatsapp/client');
 const OpenAIClient = require('./ai/openai');
-const MessageHandler = require('./whatsapp/messageHandler');
 const SupabaseClient = require('./database/supabase');
-const ConversationMemory = require('./memory/conversationMemory');
-const SessionSummarizer = require('./jobs/sessionSummarizer');
-const EnhancedMemory = require('./memory/enhancedMemory');
-const Scheduler = require('./scheduler');
-const { initializeV3 } = require('./v3');
 
-// Check which version to use
-const USE_V3 = process.env.USE_V3 === 'true';
+// V3 Architecture (Pure Conversational)
+const { initializeV3 } = require('./v3');
 
 // Banner
 console.log(`
 ╔═══════════════════════════════════════╗
 ║     APEX ASSISTANT v1.0.0             ║
 ║     WhatsApp AI Agent                 ║
-║     Architecture: ${USE_V3 ? 'V3 (Pure Conversational)' : 'V2 (Legacy)'} ║
+║     Architecture: V3 (Pure Conversational) ║
 ║     Starting up...                    ║
 ╚═══════════════════════════════════════╝
 `);
@@ -30,18 +26,10 @@ class ApexAssistant {
   constructor() {
     this.whatsapp = null;
     this.openai = null;
-    this.messageHandler = null;
     this.supabase = null;
-    this.conversationMemory = null;
-    this.sessionSummarizer = null;
-    this.enhancedMemory = null;
-    this.scheduler = null;
+    this.v3 = null;
     this.healthServer = null;
     this.startTime = Date.now();
-
-    // V3-specific properties
-    this.useV3 = USE_V3;
-    this.v3 = null;
   }
 
   async start() {
@@ -63,89 +51,52 @@ class ApexAssistant {
       this.whatsapp = new WhatsAppClient();
       await this.whatsapp.initialize();
 
-      // Initialize message handler
-      logger.info('Initializing message handler...');
-      this.messageHandler = new MessageHandler(this.whatsapp, this.openai);
-
       // Initialize database
       logger.info('Initializing Supabase...');
       this.supabase = new SupabaseClient();
 
-      if (this.useV3) {
-        // ============================================
-        // V3 INITIALIZATION (Pure Conversational)
-        // ============================================
-        logger.info('🔷 Using V3 Architecture (Pure Conversational)');
+      // ============================================
+      // V3 INITIALIZATION (Pure Conversational)
+      // ============================================
+      logger.info('🔷 Using V3 Architecture (Pure Conversational)');
 
-        // Initialize V3 system
-        logger.info('Initializing V3 modules...');
-        this.v3 = initializeV3(this.supabase);
+      // Initialize V3 system
+      logger.info('Initializing V3 modules...');
+      this.v3 = initializeV3(this.supabase);
 
-        // Override message handler to use V3
-        const originalOn = this.whatsapp.client.on.bind(this.whatsapp.client);
-        originalOn('message_create', async (message) => {
-          // Skip own messages
-          if (message.fromMe) return;
+      // Setup V3 message handler
+      const originalOn = this.whatsapp.client.on.bind(this.whatsapp.client);
+      originalOn('message_create', async (message) => {
+        // Skip own messages
+        if (message.fromMe) return;
 
-          try {
-            const chat = await message.getChat();
-            const chatContext = {
-              name: chat.name || message.from,
-              isGroup: chat.isGroup
-            };
+        try {
+          const chat = await message.getChat();
+          const chatContext = {
+            name: chat.name || message.from,
+            isGroup: chat.isGroup
+          };
 
-            const result = await this.v3.handleMessage(message, chatContext);
+          const result = await this.v3.handleMessage(message, chatContext);
 
-            if (result.shouldReply && result.response) {
-              await message.reply(result.response);
-            }
-          } catch (error) {
-            logger.error('[V3] Error handling message:', error);
+          if (result.shouldReply && result.response) {
+            await message.reply(result.response);
           }
-        });
+        } catch (error) {
+          logger.error('[V3] Error handling message:', error);
+        }
+      });
 
-        // Start V3 background jobs
-        logger.info('Starting V3 jobs (hourly notes, daily digests)...');
-        this.v3.startJobs();
+      // Start V3 background jobs
+      logger.info('Starting V3 jobs (hourly notes)...');
+      this.v3.startJobs();
 
-        logger.info('✅ APEX Assistant is running (V3)!');
-        logger.info('📱 WhatsApp: Connected');
-        logger.info('🤖 OpenAI: Ready');
-        logger.info('🔷 V3 Message Handler: Active');
-        logger.info('🕐 V3 Jobs: Running (hourly notes, daily digests)');
-        logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
-
-      } else {
-        // ============================================
-        // V2 INITIALIZATION (Legacy)
-        // ============================================
-        logger.info('🔶 Using V2 Architecture (Legacy)');
-
-        // Initialize enhanced memory system
-        logger.info('Initializing enhanced memory system...');
-        this.enhancedMemory = new EnhancedMemory(this.supabase.getClient(), this.openai);
-
-        // Initialize legacy conversation memory (for backward compatibility)
-        this.conversationMemory = new ConversationMemory(this.supabase.getClient());
-
-        // Initialize legacy session summarizer (for backward compatibility)
-        logger.info('Initializing session summarizer...');
-        this.sessionSummarizer = new SessionSummarizer(this.conversationMemory, this.openai);
-        this.sessionSummarizer.start();
-
-        // Initialize scheduler for automated jobs
-        logger.info('Initializing scheduler (3 AM digests, session compilation)...');
-        this.scheduler = new Scheduler(this.supabase.getClient(), this.openai, this.whatsapp);
-        this.scheduler.start();
-
-        logger.info('✅ APEX Assistant is running (V2)!');
-        logger.info('📱 WhatsApp: Connected');
-        logger.info('🤖 OpenAI: Ready');
-        logger.info('🧠 Enhanced Memory: Ready');
-        logger.info('📊 Session Summarizer: Running');
-        logger.info('🕐 Scheduler: Running (3 AM digest, hourly session check)');
-        logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
-      }
+      logger.info('✅ APEX Assistant is running (V3)!');
+      logger.info('📱 WhatsApp: Connected');
+      logger.info('🤖 OpenAI: Ready');
+      logger.info('🔷 V3 Message Handler: Active');
+      logger.info('🕐 V3 Jobs: Running (hourly notes)');
+      logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
 
       // Setup graceful shutdown
       this.setupShutdownHandlers();
@@ -160,7 +111,7 @@ class ApexAssistant {
     const required = [
       'OPENAI_API_KEY',
       'SUPABASE_URL',
-      'SUPABASE_SERVICE_KEY'  // Changed from SUPABASE_KEY - backend requires service_role key
+      'SUPABASE_SERVICE_KEY'
     ];
 
     const missing = required.filter(key => !process.env[key]);
@@ -221,11 +172,11 @@ class ApexAssistant {
         uptime: `${hours}h ${minutes}m`,
         uptimeSeconds: uptime,
         timestamp: new Date().toISOString(),
+        architecture: 'V3 (Pure Conversational)',
         services: {
           whatsapp: this.whatsapp ? this.whatsapp.isReady : false,
           openai: this.openai ? true : false,
-          supabase: supabaseHealthy,
-          notion: true // We can't easily check Notion, assume ok
+          supabase: supabaseHealthy
         }
       };
 
@@ -246,7 +197,7 @@ class ApexAssistant {
         <!DOCTYPE html>
         <html>
         <head>
-          <title>APEX Assistant</title>
+          <title>APEX Assistant V3</title>
           <style>
             body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
             h1 { color: #10b981; }
@@ -257,11 +208,12 @@ class ApexAssistant {
           </style>
         </head>
         <body>
-          <h1>🤖 APEX Assistant</h1>
-          <p>WhatsApp AI Agent for Project Management</p>
+          <h1>🤖 APEX Assistant V3</h1>
+          <p>WhatsApp AI Agent - Pure Conversational Architecture</p>
           <div class="status">
             <strong>Status:</strong> Running ✅<br>
-            <strong>Version:</strong> 1.0.0<br>
+            <strong>Version:</strong> 1.0.0 (V3)<br>
+            <strong>Architecture:</strong> Pure Conversational<br>
             <strong>Uptime:</strong> Check <a href="/health">/health</a>
           </div>
 
@@ -294,16 +246,10 @@ class ApexAssistant {
       logger.info(`\n${signal} received. Shutting down gracefully...`);
 
       try {
-        // Stop V3 jobs if running
-        if (this.useV3 && this.v3) {
+        // Stop V3 jobs
+        if (this.v3) {
           logger.info('Stopping V3 jobs...');
           this.v3.stopJobs();
-        }
-
-        // Stop V2 scheduler if running
-        if (this.scheduler) {
-          logger.info('Stopping scheduler...');
-          this.scheduler.stop();
         }
 
         // Close WhatsApp connection

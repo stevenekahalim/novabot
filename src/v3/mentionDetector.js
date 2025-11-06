@@ -60,7 +60,13 @@ class MentionDetector {
       return true;
     }
 
-    // In group chats, only respond if mentioned
+    // In group chats, check if Nova is mentioned via WhatsApp's @mention system
+    if (message.mentionedIds && Array.isArray(message.mentionedIds) && message.mentionedIds.length > 0) {
+      // Nova was @mentioned in the group
+      return true;
+    }
+
+    // Also check text patterns (for backwards compatibility)
     return this.detectMention(message.body);
   }
 }
