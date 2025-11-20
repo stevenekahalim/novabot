@@ -1,7 +1,7 @@
 /**
- * V3 Message Handler
- * Core message processing: save, detect mentions, generate responses
- * Philosophy: Save everything, respond only when @tagged or in DM
+ * V4 Message Handler
+ * Core message processing: save, router decision, generate responses, parse action tags
+ * Philosophy: Save everything, router decides PASS/IGNORE, Nova decides SILENT/REMIND/REPLY
  */
 
 const logger = require('../utils/logger');
@@ -10,6 +10,7 @@ const ResponseGenerator = require('./responseGenerator');
 const MentionDetector = require('./mentionDetector');
 const ReminderParser = require('./reminderParser');
 const ReminderManager = require('./reminderManager');
+const Router = require('./router');
 const pdfParse = require('pdf-parse');
 
 class MessageHandler {
@@ -20,6 +21,7 @@ class MessageHandler {
     this.mentionDetector = new MentionDetector();
     this.reminderParser = new ReminderParser();
     this.reminderManager = new ReminderManager(supabaseClient);
+    this.router = new Router(supabaseClient); // V4: Router for PASS/IGNORE decisions
 
     // Whitelist of approved chat IDs where Nova can respond
     this.APPROVED_CHATS = [
@@ -32,41 +34,61 @@ class MessageHandler {
    * Handle incoming WhatsApp message
    * @param {Object} message - WhatsApp web.js Message object
    * @param {Object} chatContext - Chat information (name, type, etc.)
-   * @returns {Object} { shouldReply: boolean, response: string|null }
+   * @returns {Object} { shouldReply: boolean, response: string|null, reaction: string|null }
    */
   async handleMessage(message, chatContext = {}) {
     try {
       const messageText = message.body;
       const chatId = message.from;
       const chatName = chatContext.name || message.from;
+      const senderName = message._data.notifyName || message.from;
 
-      logger.info(`[V3] Handling message from ${chatName}: "${messageText.substring(0, 50)}..."`);
+      logger.info(`[V4] Handling message from ${chatName}: "${messageText.substring(0, 50)}..."`);
 
       // 1. Save message to database
       const savedMessage = await this._saveMessage(message, chatContext);
 
       if (!savedMessage) {
-        logger.error('[V3] Failed to save message, aborting');
-        return { shouldReply: false, response: null };
+        logger.error('[V4] Failed to save message, aborting');
+        return { shouldReply: false, response: null, reaction: null };
       }
 
       // 2. Check if chat is approved (whitelist filter)
       if (!this.APPROVED_CHATS.includes(chatId)) {
-        logger.info(`[V3] Chat not in whitelist (${chatName}), ignoring`);
-        return { shouldReply: false, response: null };
+        logger.info(`[V4] Chat not in whitelist (${chatName}), ignoring`);
+        return { shouldReply: false, response: null, reaction: null };
       }
 
-      // 3. Check for reminder requests (parse with AI if mentioned)
+      // 3. Check if Nova is mentioned
       const isMentioned = this.mentionDetector.shouldRespond(message);
+
+      // 4. V4 ROUTER DECISION (PASS or IGNORE)
+      // If mentioned, automatically pass. Otherwise, ask router.
+      let routerDecision;
+      if (isMentioned) {
+        routerDecision = { action: 'pass', confidence: 1.0, reason: 'Nova explicitly mentioned', method: 'heuristic' };
+        logger.info('[V4 Router] PASS (mentioned)');
+      } else {
+        routerDecision = await this.router.decide(messageText, { isMentioned, senderName, chatId });
+        logger.info(`[V4 Router] ${routerDecision.action.toUpperCase()} (${routerDecision.method}): ${routerDecision.reason}`);
+      }
+
+      // If router says IGNORE, stop here
+      if (routerDecision.action === 'ignore') {
+        return { shouldReply: false, response: null, reaction: null };
+      }
+
+      // 5. Router said PASS - Check for OLD REMINDER SYSTEM (backward compatibility)
+      // Only parse reminders if Nova is explicitly mentioned
       if (isMentioned) {
         const reminderData = await this.reminderParser.parseReminder(
           messageText,
-          message._data.notifyName || message.from,
+          senderName,
           chatId
         );
 
         if (reminderData) {
-          logger.info('[V3] ⏰ Reminder detected, saving to database');
+          logger.info('[V4] ⏰ Old-style reminder detected (via mention), saving to database');
           const createdReminder = await this.reminderManager.createReminder(reminderData);
 
           if (createdReminder) {
@@ -74,23 +96,16 @@ class MessageHandler {
             const confirmationMsg = this._formatReminderConfirmation(createdReminder);
             return {
               shouldReply: true,
-              response: confirmationMsg
+              response: confirmationMsg,
+              reaction: null
             };
           }
         }
       }
 
-      // 4. Check if Nova should respond (regular conversation)
-      const shouldRespond = isMentioned;
+      logger.info('[V4] Router passed, generating Nova response...');
 
-      if (!shouldRespond) {
-        logger.info('[V3] Not mentioned, staying silent');
-        return { shouldReply: false, response: null };
-      }
-
-      logger.info('[V3] Mentioned or DM, generating response...');
-
-      // 4. Load full conversation context (ALWAYS from group chat - all historical + today)
+      // 6. Load full conversation context (ALWAYS from group chat - all historical + today)
       const GROUP_CHAT_ID = '120363420201458845@g.us'; // Apex Sports Lab group
       const context = await this.contextLoader.loadFullContext(GROUP_CHAT_ID, {
         messageDaysBack: null,     // null = ALL messages (no date filter)
@@ -98,22 +113,65 @@ class MessageHandler {
         includeTodaysRaw: true     // Include today's raw messages
       });
 
-      // 5. Generate response
-      const response = await this.responseGenerator.generate(
+      // 7. Generate response (Nova with V4 action tags)
+      const rawResponse = await this.responseGenerator.generate(
         messageText,
         context,
         {
-          name: message._data.notifyName || message.from,
-          sender_name: message._data.notifyName || message.from
+          name: senderName,
+          sender_name: senderName
         }
       );
 
-      logger.info(`[V3] Generated response: "${response.substring(0, 100)}..."`);
+      logger.info(`[V4] Nova generated: "${rawResponse.substring(0, 100)}..."`);
 
-      return {
-        shouldReply: true,
-        response: response
-      };
+      // 8. V4 PARSE ACTION TAG from Nova's response
+      const actionTag = this._parseActionTag(rawResponse);
+      logger.info(`[V4 Action] Tag: ${actionTag.action}, Mentioned: ${isMentioned}`);
+
+      // 9. V4 EXECUTE based on action tag
+      switch (actionTag.action) {
+        case 'SILENT':
+          // Nova says stay quiet - log only
+          logger.info('[V4 Action] SILENT - No reply, no reaction');
+          return { shouldReply: false, response: null, reaction: null };
+
+        case 'REMIND':
+          // Nova detected implicit reminder
+          if (actionTag.reminderData) {
+            logger.info('[V4 Action] REMIND - Saving reminder');
+            const createdReminder = await this.reminderManager.createReminder(actionTag.reminderData);
+
+            if (createdReminder) {
+              // If Nova was mentioned, send text confirmation
+              // If NOT mentioned (implicit), react with emoji
+              if (isMentioned) {
+                const confirmationMsg = this._formatReminderConfirmation(createdReminder);
+                return { shouldReply: true, response: confirmationMsg, reaction: null };
+              } else {
+                // Silent reminder - react with ⏰ emoji
+                logger.info('[V4 Action] REMIND (silent) - Reacting with ⏰');
+                return { shouldReply: false, response: null, reaction: '⏰' };
+              }
+            }
+          }
+          // Fallback: if reminder parsing failed, stay silent
+          return { shouldReply: false, response: null, reaction: null };
+
+        case 'REPLY':
+          // Nova says send message
+          logger.info('[V4 Action] REPLY - Sending message');
+          return {
+            shouldReply: true,
+            response: actionTag.replyText,
+            reaction: null
+          };
+
+        default:
+          // Unknown action - log warning and stay silent
+          logger.warn(`[V4 Action] Unknown action "${actionTag.action}" - defaulting to SILENT`);
+          return { shouldReply: false, response: null, reaction: null };
+      }
 
     } catch (error) {
       logger.error('[V3] Error in messageHandler:', error);
@@ -339,6 +397,53 @@ class MessageHandler {
            `⏰ Time: ${formattedTime} WIB\n` +
            `💬 Message: ${reminder.message}\n\n` +
            `_I'll remind them at the scheduled time_`;
+  }
+
+  /**
+   * V4: Parse action tag from Nova's response
+   * @private
+   * @param {string} responseText - Raw response from Nova
+   * @returns {Object} { action: 'SILENT'|'REMIND'|'REPLY', reminderData: {...}|null, replyText: string|null }
+   */
+  _parseActionTag(responseText) {
+    const text = responseText.trim();
+
+    // Match [SILENT]
+    if (text.startsWith('[SILENT]')) {
+      return { action: 'SILENT', reminderData: null, replyText: null };
+    }
+
+    // Match [REMIND] {...}
+    const remindMatch = text.match(/^\[REMIND\]\s*(\{[\s\S]*?\})/);
+    if (remindMatch) {
+      try {
+        const reminderJson = remindMatch[1];
+        const reminderData = JSON.parse(reminderJson);
+
+        // Validate required fields
+        if (reminderData.assigned_to && reminderData.reminder_date &&
+            reminderData.reminder_time && reminderData.message) {
+          return { action: 'REMIND', reminderData, replyText: null };
+        } else {
+          logger.error('[V4 Parser] Invalid REMIND JSON - missing required fields:', reminderData);
+          return { action: 'SILENT', reminderData: null, replyText: null };
+        }
+      } catch (error) {
+        logger.error('[V4 Parser] Failed to parse REMIND JSON:', error.message);
+        return { action: 'SILENT', reminderData: null, replyText: null };
+      }
+    }
+
+    // Match [REPLY] message
+    const replyMatch = text.match(/^\[REPLY\]\s*([\s\S]*)/);
+    if (replyMatch) {
+      const replyText = replyMatch[1].trim();
+      return { action: 'REPLY', reminderData: null, replyText };
+    }
+
+    // No tag found - default to REPLY with full text (backward compatibility)
+    logger.warn('[V4 Parser] No action tag found in response - defaulting to REPLY');
+    return { action: 'REPLY', reminderData: null, replyText: text };
   }
 }
 

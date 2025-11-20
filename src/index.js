@@ -17,7 +17,7 @@ console.log(`
 ╔═══════════════════════════════════════╗
 ║     APEX ASSISTANT v1.0.0             ║
 ║     WhatsApp AI Agent                 ║
-║     Architecture: V3 (Pure Conversational) ║
+║     Architecture: V4 (Silent Observer) ║
 ║     Starting up...                    ║
 ╚═══════════════════════════════════════╝
 `);
@@ -59,15 +59,15 @@ class ApexAssistant {
       global.whatsappClient = this.whatsapp;
 
       // ============================================
-      // V3 INITIALIZATION (Pure Conversational)
+      // V4 INITIALIZATION (Silent Observer)
       // ============================================
-      logger.info('🔷 Using V3 Architecture (Pure Conversational)');
+      logger.info('🔷 Using V4 Architecture (Silent Observer)');
 
-      // Initialize V3 system with WhatsApp client for daily updates
-      logger.info('Initializing V3 modules...');
+      // Initialize V4 system with WhatsApp client for daily updates
+      logger.info('Initializing V4 modules...');
       this.v3 = initializeV3(this.supabase, this.whatsapp.client);
 
-      // Setup V3 message handler
+      // Setup V4 message handler (with buffer + router)
       const originalOn = this.whatsapp.client.on.bind(this.whatsapp.client);
       originalOn('message_create', async (message) => {
         // Skip own messages
@@ -80,28 +80,30 @@ class ApexAssistant {
             isGroup: chat.isGroup
           };
 
-          const result = await this.v3.handleMessage(message, chatContext);
+          // V4: Add to buffer (async, returns immediately)
+          await this.v3.handleMessage(message, chatContext);
 
-          if (result.shouldReply && result.response) {
-            await message.reply(result.response);
-          }
+          // Note: Actual processing happens in messageBuffer after 15s debounce
+          // The buffer's processCallback will call messageHandler.handleMessage()
+          // which returns { shouldReply, response, reaction }
+
         } catch (error) {
-          logger.error('[V3] Error handling message:', error);
+          logger.error('[V4] Error handling message:', error);
         }
       });
 
-      // Start V3 background jobs
-      logger.info('Starting V3 jobs (knowledge compilation + daily updates)...');
+      // Start V4 background jobs
+      logger.info('Starting V4 jobs (knowledge compilation + daily updates + reminders)...');
       this.v3.startJobs();
 
       // Make dailyUpdates accessible to trigger API routes
       this.healthServer.app.locals.dailyUpdates = this.v3.dailyUpdatesJob;
 
-      logger.info('✅ APEX Assistant is running (V3)!');
+      logger.info('✅ APEX Assistant is running (V4)!');
       logger.info('📱 WhatsApp: Connected');
-      logger.info('🤖 OpenAI: Ready');
-      logger.info('🔷 V3 Message Handler: Active');
-      logger.info('🕐 V3 Jobs: Running (midnight WIB compilation + 9 AM/3:30 PM WIB updates)');
+      logger.info('🤖 AI Models: OpenAI (Router: GPT-4o-mini, Compiler: GPT-4) + Anthropic (Nova: Sonnet 4.5)');
+      logger.info('🔷 V4 Silent Observer: Active (15s buffer + Router + Nova)');
+      logger.info('🕐 V4 Jobs: Running (midnight WIB compilation + 9 AM/3:30 PM WIB updates + reminders)');
       logger.info('🌏 Timezone: All jobs run on Indonesia WIB (UTC+7)');
       logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
 
@@ -197,7 +199,7 @@ class ApexAssistant {
         uptime: `${hours}h ${minutes}m`,
         uptimeSeconds: uptime,
         timestamp: new Date().toISOString(),
-        architecture: 'V3 (Pure Conversational)',
+        architecture: 'V4 (Silent Observer)',
         services: {
           whatsapp: this.whatsapp ? this.whatsapp.isReady : false,
           openai: this.openai ? true : false,
@@ -222,7 +224,7 @@ class ApexAssistant {
         <!DOCTYPE html>
         <html>
         <head>
-          <title>APEX Assistant V3</title>
+          <title>APEX Assistant V4</title>
           <style>
             body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
             h1 { color: #10b981; }
@@ -233,12 +235,12 @@ class ApexAssistant {
           </style>
         </head>
         <body>
-          <h1>🤖 APEX Assistant V3</h1>
-          <p>WhatsApp AI Agent - Pure Conversational Architecture</p>
+          <h1>🤖 APEX Assistant V4</h1>
+          <p>WhatsApp AI Agent - Silent Observer Architecture</p>
           <div class="status">
             <strong>Status:</strong> Running ✅<br>
-            <strong>Version:</strong> 1.0.0 (V3)<br>
-            <strong>Architecture:</strong> Pure Conversational<br>
+            <strong>Version:</strong> 1.0.0 (V4)<br>
+            <strong>Architecture:</strong> Silent Observer (Router + Buffer + Nova)<br>
             <strong>Uptime:</strong> Check <a href="/health">/health</a>
           </div>
 
