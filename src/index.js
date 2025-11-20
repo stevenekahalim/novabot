@@ -39,7 +39,11 @@ class ApexAssistant {
       // Validate environment variables
       this.validateEnv();
 
-      // Initialize health check server
+      // Initialize database FIRST (needed for metrics)
+      logger.info('Initializing Supabase...');
+      this.supabase = new SupabaseClient();
+
+      // Initialize health check server (now has Supabase available)
       await this.startHealthServer();
 
       // Initialize OpenAI client
@@ -51,18 +55,17 @@ class ApexAssistant {
       this.whatsapp = new WhatsAppClient();
       await this.whatsapp.initialize();
 
-      // Initialize database
-      logger.info('Initializing Supabase...');
-      this.supabase = new SupabaseClient();
+      // Update global references for metrics
+      global.whatsappClient = this.whatsapp;
 
       // ============================================
       // V3 INITIALIZATION (Pure Conversational)
       // ============================================
       logger.info('🔷 Using V3 Architecture (Pure Conversational)');
 
-      // Initialize V3 system
+      // Initialize V3 system with WhatsApp client for daily updates
       logger.info('Initializing V3 modules...');
-      this.v3 = initializeV3(this.supabase);
+      this.v3 = initializeV3(this.supabase, this.whatsapp.client);
 
       // Setup V3 message handler
       const originalOn = this.whatsapp.client.on.bind(this.whatsapp.client);
@@ -88,14 +91,18 @@ class ApexAssistant {
       });
 
       // Start V3 background jobs
-      logger.info('Starting V3 jobs (hourly notes)...');
+      logger.info('Starting V3 jobs (knowledge compilation + daily updates)...');
       this.v3.startJobs();
+
+      // Make dailyUpdates accessible to trigger API routes
+      this.healthServer.app.locals.dailyUpdates = this.v3.dailyUpdatesJob;
 
       logger.info('✅ APEX Assistant is running (V3)!');
       logger.info('📱 WhatsApp: Connected');
       logger.info('🤖 OpenAI: Ready');
       logger.info('🔷 V3 Message Handler: Active');
-      logger.info('🕐 V3 Jobs: Running (hourly notes)');
+      logger.info('🕐 V3 Jobs: Running (midnight WIB compilation + 9 AM/3:30 PM WIB updates)');
+      logger.info('🌏 Timezone: All jobs run on Indonesia WIB (UTC+7)');
       logger.info(`🏥 Health check: http://localhost:${process.env.PORT || 3000}/health`);
 
       // Setup graceful shutdown
@@ -126,6 +133,24 @@ class ApexAssistant {
   async startHealthServer() {
     const app = express();
     const port = process.env.PORT || 3000;
+
+    // Store supabase client in app locals for metrics routes
+    app.locals.supabase = this.supabase;
+
+    // Store startTime globally for metrics
+    global.startTime = this.startTime;
+    global.whatsappClient = this.whatsapp;
+
+    // Serve static files from public directory
+    app.use(express.static(path.join(__dirname, '..', 'public')));
+
+    // Metrics API routes
+    const metricsRoutes = require('./routes/metrics');
+    app.use('/api/metrics', metricsRoutes);
+
+    // Trigger routes for manual daily updates
+    const triggerRoutes = require('./routes/triggers');
+    app.use('/api/trigger', triggerRoutes);
 
     // QR Code endpoint
     app.get('/qr', (req, res) => {
@@ -239,6 +264,9 @@ class ApexAssistant {
     this.healthServer = app.listen(port, '0.0.0.0', () => {
       logger.info(`✅ Health server running on port ${port}`);
     });
+
+    // Store app reference for later use
+    this.healthServer.app = app;
   }
 
   setupShutdownHandlers() {

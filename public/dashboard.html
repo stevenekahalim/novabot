@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nova Monitoring Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: #333;
+        }
+
+        .header .meta {
+            text-align: right;
+            color: #666;
+            font-size: 14px;
+        }
+
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .card {
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .card h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .card h2::before {
+            margin-right: 8px;
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .stat {
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            color: #333;
+            font-weight: 600;
+        }
+
+        .topics-list {
+            list-style: none;
+        }
+
+        .topics-list li {
+            padding: 8px;
+            margin: 4px 0;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border-left: 3px solid #007bff;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status-warning {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 16px;
+            border-radius: 4px;
+            margin: 16px 0;
+        }
+
+        .breakdown {
+            margin-top: 12px;
+            padding-left: 16px;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .services {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .service {
+            padding: 8px 16px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>🤖 Nova Monitoring Dashboard</h1>
+                <div class="meta">
+                    <div id="lastUpdated">Loading...</div>
+                    <button onclick="loadMetrics()" id="refreshBtn">Refresh</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="content">
+            <div class="loading">Loading metrics...</div>
+        </div>
+    </div>
+
+    <script>
+        async function loadMetrics() {
+            const refreshBtn = document.getElementById('refreshBtn');
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = 'Loading...';
+
+            try {
+                const response = await fetch('/api/metrics/daily');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                renderDashboard(data);
+
+                const now = new Date().toLocaleString('en-US', {
+                    timeZone: 'Asia/Jakarta',
+                    dateStyle: 'medium',
+                    timeStyle: 'short'
+                });
+                document.getElementById('lastUpdated').textContent = `Last Updated: ${now}`;
+
+            } catch (error) {
+                console.error('Error loading metrics:', error);
+                document.getElementById('content').innerHTML = `
+                    <div class="error">
+                        <strong>Error loading metrics:</strong> ${error.message}
+                    </div>
+                `;
+            } finally {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = 'Refresh';
+            }
+        }
+
+        function renderDashboard(data) {
+            const content = document.getElementById('content');
+
+            content.innerHTML = `
+                <!-- Raw Messages Card -->
+                <div class="card">
+                    <h2>📅 Yesterday's Activity (${data.date})</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-label">Messages Received</div>
+                            <div class="stat-value">${data.raw_messages.count}</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Participants</div>
+                            <div class="stat-value">${data.raw_messages.participants.length}</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Nova Mentions</div>
+                            <div class="stat-value">${data.raw_messages.nova_mentions}</div>
+                        </div>
+                    </div>
+                    ${data.raw_messages.count > 0 ? `
+                        <div style="margin-top: 12px; color: #666; font-size: 14px;">
+                            <strong>Time Range:</strong>
+                            ${new Date(data.raw_messages.first_message_at).toLocaleTimeString('en-US', {timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit'})}
+                            -
+                            ${new Date(data.raw_messages.last_message_at).toLocaleTimeString('en-US', {timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit'})}
+                            <br>
+                            <strong>Participants:</strong> ${data.raw_messages.participants.join(', ')}
+                        </div>
+                    ` : ''}
+                </div>
+
+                <!-- Knowledge Base Card -->
+                <div class="card">
+                    <h2>📚 Knowledge Base Compilation</h2>
+                    <div style="margin-bottom: 16px;">
+                        <span class="status-badge ${data.knowledge_base.status === 'success' ? 'status-success' : data.knowledge_base.status === 'error' ? 'status-error' : 'status-warning'}">
+                            ${data.knowledge_base.status === 'success' ? '✅ Successful' : data.knowledge_base.status === 'error' ? '❌ Error' : '⚠️ No Entries'}
+                        </span>
+                        ${data.knowledge_base.last_compilation_at ? `
+                            <span style="margin-left: 12px; color: #666; font-size: 14px;">
+                                Ran at: ${new Date(data.knowledge_base.last_compilation_at).toLocaleString('en-US', {timeZone: 'Asia/Jakarta'})}
+                            </span>
+                        ` : ''}
+                    </div>
+
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-label">Entries Created</div>
+                            <div class="stat-value">${data.knowledge_base.entries_created}</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Messages Covered</div>
+                            <div class="stat-value">${data.knowledge_base.total_messages_covered} / ${data.raw_messages.count}</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Coverage</div>
+                            <div class="stat-value">${data.raw_messages.count > 0 ? Math.round((data.knowledge_base.total_messages_covered / data.raw_messages.count) * 100) : 0}%</div>
+                        </div>
+                    </div>
+
+                    ${data.knowledge_base.topics && data.knowledge_base.topics.length > 0 ? `
+                        <div style="margin-top: 20px;">
+                            <strong>Topics Stored:</strong>
+                            <ul class="topics-list">
+                                ${data.knowledge_base.topics.map(topic => `<li>${topic}</li>`).join('')}
+                            </ul>
+                        </div>
+                    ` : ''}
+                </div>
+
+                <!-- API Costs Card -->
+                <div class="card">
+                    <h2>💰 API Costs</h2>
+
+                    <!-- Yesterday's Costs -->
+                    <div style="margin-bottom: 24px;">
+                        <h3 style="font-size: 16px; color: #666; margin-bottom: 12px;">Yesterday (${data.date})</h3>
+                        <div class="stat-grid">
+                            <div class="stat">
+                                <div class="stat-label">Total Cost</div>
+                                <div class="stat-value">$${data.api_costs.total_yesterday.toFixed(2)}</div>
+                            </div>
+                            <div class="stat">
+                                <div class="stat-label">Monthly Projection</div>
+                                <div class="stat-value">$${data.api_costs.monthly_projection || (data.api_costs.total_yesterday * 30).toFixed(2)}</div>
+                            </div>
+                        </div>
+
+                        <div class="breakdown">
+                            <div>• Nova Responses: $${data.api_costs.breakdown.responses.toFixed(2)} (${data.api_costs.total_yesterday > 0 ? Math.round((data.api_costs.breakdown.responses / data.api_costs.total_yesterday) * 100) : 0}%)</div>
+                            <div>• Daily Updates: $${data.api_costs.breakdown.daily_updates.toFixed(2)} (${data.api_costs.total_yesterday > 0 ? Math.round((data.api_costs.breakdown.daily_updates / data.api_costs.total_yesterday) * 100) : 0}%)</div>
+                            <div>• Knowledge Compilation: $${data.api_costs.breakdown.knowledge_compilation.toFixed(2)} (${data.api_costs.total_yesterday > 0 ? Math.round((data.api_costs.breakdown.knowledge_compilation / data.api_costs.total_yesterday) * 100) : 0}%)</div>
+                        </div>
+                    </div>
+
+                    <!-- Month-to-Date Costs -->
+                    ${data.api_costs_mtd ? `
+                        <div style="padding-top: 24px; border-top: 2px solid #f0f0f0;">
+                            <h3 style="font-size: 16px; color: #666; margin-bottom: 12px;">Month-to-Date (${data.api_costs_mtd.month})</h3>
+                            <div class="stat-grid">
+                                <div class="stat">
+                                    <div class="stat-label">MTD Total</div>
+                                    <div class="stat-value">$${data.api_costs_mtd.total.toFixed(2)}</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-label">Daily Average</div>
+                                    <div class="stat-value">$${data.api_costs_mtd.daily_average.toFixed(2)}</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-label">Days Tracked</div>
+                                    <div class="stat-value">${data.api_costs_mtd.days_in_month}</div>
+                                </div>
+                            </div>
+
+                            <div class="breakdown">
+                                <div>• Nova Responses: $${data.api_costs_mtd.breakdown.responses.toFixed(2)} (${data.api_costs_mtd.total > 0 ? Math.round((data.api_costs_mtd.breakdown.responses / data.api_costs_mtd.total) * 100) : 0}%)</div>
+                                <div>• Daily Updates: $${data.api_costs_mtd.breakdown.daily_updates.toFixed(2)} (${data.api_costs_mtd.total > 0 ? Math.round((data.api_costs_mtd.breakdown.daily_updates / data.api_costs_mtd.total) * 100) : 0}%)</div>
+                                <div>• Knowledge Compilation: $${data.api_costs_mtd.breakdown.knowledge_compilation.toFixed(2)} (${data.api_costs_mtd.total > 0 ? Math.round((data.api_costs_mtd.breakdown.knowledge_compilation / data.api_costs_mtd.total) * 100) : 0}%)</div>
+                            </div>
+                        </div>
+                    ` : ''}
+                </div>
+
+                <!-- System Health Card -->
+                <div class="card">
+                    <h2>🔧 System Health</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-label">Uptime</div>
+                            <div class="stat-value">${data.system_health.uptime_hours} hrs</div>
+                            <div style="font-size: 12px; color: #666; margin-top: 4px;">
+                                ${Math.floor(data.system_health.uptime_hours / 24)} days
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 16px;">
+                        <strong>Services:</strong>
+                        <div class="services">
+                            <div class="service">
+                                WhatsApp: <span class="status-badge ${data.system_health.services.whatsapp === 'connected' ? 'status-success' : 'status-error'}">
+                                    ${data.system_health.services.whatsapp}
+                                </span>
+                            </div>
+                            <div class="service">
+                                Supabase: <span class="status-badge ${data.system_health.services.supabase === 'healthy' ? 'status-success' : 'status-error'}">
+                                    ${data.system_health.services.supabase}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    ${data.system_health.last_error ? `
+                        <div style="margin-top: 16px;">
+                            <strong>Last Error:</strong>
+                            <div style="background: #fff3cd; padding: 8px; border-radius: 4px; margin-top: 8px; font-size: 14px;">
+                                ${data.system_health.last_error.message}
+                                <br>
+                                <span style="color: #666; font-size: 12px;">
+                                    ${new Date(data.system_health.last_error.timestamp).toLocaleString('en-US', {timeZone: 'Asia/Jakarta'})}
+                                </span>
+                            </div>
+                        </div>
+                    ` : `
+                        <div style="margin-top: 16px; color: #28a745;">
+                            ✅ No recent errors
+                        </div>
+                    `}
+                </div>
+            `;
+        }
+
+        // Load metrics on page load
+        loadMetrics();
+
+        // Auto-refresh every 5 minutes
+        setInterval(loadMetrics, 5 * 60 * 1000);
+    </script>
+</body>
+</html>

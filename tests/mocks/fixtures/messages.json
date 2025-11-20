@@ -1,0 +1,56 @@
+{
+  "raw_messages": [
+    {
+      "id": "msg-001",
+      "chat_id": "120363420201458845@g.us",
+      "sender_phone": "6281234567890",
+      "sender_name": "Win",
+      "message_text": "Hi team, the Manado court project is progressing well",
+      "timestamp": "2025-11-07T10:00:00.000Z",
+      "created_at": "2025-11-07T10:00:00.000Z"
+    },
+    {
+      "id": "msg-002",
+      "chat_id": "120363420201458845@g.us",
+      "sender_phone": "6281234567891",
+      "sender_name": "John",
+      "message_text": "@Nova what's the status of the Manado project?",
+      "timestamp": "2025-11-07T10:05:00.000Z",
+      "created_at": "2025-11-07T10:05:00.000Z"
+    },
+    {
+      "id": "msg-003",
+      "chat_id": "120363420201458845@g.us",
+      "sender_phone": "6281234567892",
+      "sender_name": "Sarah",
+      "message_text": "The budget for turf is around 9 million",
+      "timestamp": "2025-11-07T10:10:00.000Z",
+      "created_at": "2025-11-07T10:10:00.000Z"
+    }
+  ],
+  "knowledge_base_entries": [
+    {
+      "id": "kb-001",
+      "chat_id": "120363420201458845@g.us",
+      "topic": "Manado Court Project",
+      "content": "Project discussion about building a new padel court in Manado. Budget considerations and vendor options were discussed.",
+      "tags": ["manado", "court", "budget"],
+      "message_count": 15,
+      "date_range_start": "2025-11-05T00:00:00.000Z",
+      "date_range_end": "2025-11-06T23:59:59.000Z",
+      "created_at": "2025-11-07T00:00:00.000Z"
+    },
+    {
+      "id": "kb-002",
+      "chat_id": "120363420201458845@g.us",
+      "topic": "Vendor Selection",
+      "content": "Three vendors identified: Artgrass, Indo Padel, and Local Supplier. Artgrass quoted 9M IDR for installation.",
+      "tags": ["vendor", "pricing", "artgrass"],
+      "message_count": 8,
+      "date_range_start": "2025-11-06T00:00:00.000Z",
+      "date_range_end": "2025-11-06T23:59:59.000Z",
+      "created_at": "2025-11-07T00:00:00.000Z"
+    }
+  ],
+  "empty_results": []
+}

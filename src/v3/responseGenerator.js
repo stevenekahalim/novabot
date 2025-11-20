@@ -1,26 +1,28 @@
 /**
  * V3 Response Generator
- * Generates AI responses using OpenAI with full conversational context
+ * Generates AI responses using Claude 3.5 Sonnet with full conversational context
  * Philosophy: Let AI infer from raw context, no structured extraction
  */
 
-const OpenAI = require('openai');
+const Anthropic = require('@anthropic-ai/sdk');
 const logger = require('../utils/logger');
 const NOVA_PROMPT = require('../prompts/response');
 
 class ResponseGenerator {
   constructor() {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+    this.anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY
     });
 
-    // Model selection will be dynamic based on context size
-    this.defaultModel = process.env.OPENAI_MODEL_RESPONSE || 'gpt-4-turbo';
-    this.maxTokens = 300; // Keep responses concise (max 5 lines)
+    // Model selection: Claude Sonnet 4.5 for superior reasoning
+    this.defaultModel = 'claude-sonnet-4-5-20250929';
+    this.maxTokens = 1000; // Increased for more detailed responses
 
     // Model pricing (per 1K tokens) for cost estimation
     this.modelPricing = {
-      'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+      'claude-sonnet-4-5-20250929': { input: 0.003, output: 0.015 },
+      'claude-3-7-sonnet-20250219': { input: 0.003, output: 0.015 },
+      'claude-3-5-haiku-20241022': { input: 0.001, output: 0.005 },
       'gpt-4o': { input: 0.0025, output: 0.01 },
       'gpt-4-turbo': { input: 0.01, output: 0.03 }
     };
@@ -37,8 +39,8 @@ class ResponseGenerator {
     try {
       logger.info(`Generating V3 response for message: "${messageText.substring(0, 50)}..."`);
 
-      // Build the conversation history for OpenAI
-      const messages = this._buildChatMessages(messageText, context, senderInfo);
+      // Build the system prompt and user message for Claude
+      const { systemPrompt, userMessage } = this._buildClaudeMessages(messageText, context, senderInfo);
 
       // Smart model selection based on context size
       const messageCount = context.messages.count;
@@ -46,19 +48,20 @@ class ResponseGenerator {
 
       logger.info(`[Token Monitor] Context size: ${messageCount} messages | Model: ${selectedModel}`);
 
-      // Call OpenAI
+      // Call Claude
       const startTime = Date.now();
-      const completion = await this.openai.chat.completions.create({
+      const completion = await this.anthropic.messages.create({
         model: selectedModel,
-        messages: messages,
         max_tokens: this.maxTokens,
-        temperature: 0.7,
-        presence_penalty: 0.3, // Avoid repetitive responses
-        frequency_penalty: 0.3
+        temperature: 0.3, // Lower for more consistent project management responses
+        system: systemPrompt,
+        messages: [
+          { role: 'user', content: userMessage }
+        ]
       });
 
       const duration = Date.now() - startTime;
-      const response = completion.choices[0].message.content.trim();
+      const response = completion.content[0].text.trim();
 
       // Log token usage and cost
       this._logTokenUsage(completion, selectedModel, duration, messageCount);
@@ -70,7 +73,7 @@ class ResponseGenerator {
     } catch (error) {
       logger.error('Error generating V3 response:', error);
 
-      // Fallback response if OpenAI fails
+      // Fallback response if Claude fails
       return '⚠️ Error generating response. Try again.';
     }
   }
@@ -80,18 +83,8 @@ class ResponseGenerator {
    * @private
    */
   _selectModel(messageCount) {
-    // Small context: Use fastest, cheapest model
-    if (messageCount < 50) {
-      return 'gpt-4o-mini';
-    }
-
-    // Medium context: Balanced model
-    if (messageCount < 200) {
-      return 'gpt-4o';
-    }
-
-    // Large context: Most capable model
-    return 'gpt-4-turbo';
+    // Always use Claude Sonnet 4.5 for superior reasoning
+    return 'claude-sonnet-4-5-20250929';
   }
 
   /**
@@ -102,45 +95,61 @@ class ResponseGenerator {
     const usage = completion.usage;
     if (!usage) return;
 
-    const pricing = this.modelPricing[model] || this.modelPricing['gpt-4-turbo'];
-    const inputCost = (usage.prompt_tokens / 1000) * pricing.input;
-    const outputCost = (usage.completion_tokens / 1000) * pricing.output;
+    const pricing = this.modelPricing[model] || this.modelPricing['claude-sonnet-4-5-20250929'];
+
+    // Claude uses input_tokens and output_tokens
+    const inputTokens = usage.input_tokens;
+    const outputTokens = usage.output_tokens;
+    const totalTokens = inputTokens + outputTokens;
+
+    const inputCost = (inputTokens / 1000) * pricing.input;
+    const outputCost = (outputTokens / 1000) * pricing.output;
     const totalCost = inputCost + outputCost;
 
     logger.info(`[Token Monitor] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     logger.info(`[Token Monitor] Model: ${model}`);
     logger.info(`[Token Monitor] Context: ${messageCount} messages`);
-    logger.info(`[Token Monitor] Input tokens: ${usage.prompt_tokens}`);
-    logger.info(`[Token Monitor] Output tokens: ${usage.completion_tokens}`);
-    logger.info(`[Token Monitor] Total tokens: ${usage.total_tokens}`);
+    logger.info(`[Token Monitor] Input tokens: ${inputTokens}`);
+    logger.info(`[Token Monitor] Output tokens: ${outputTokens}`);
+    logger.info(`[Token Monitor] Total tokens: ${totalTokens}`);
     logger.info(`[Token Monitor] Duration: ${duration}ms`);
     logger.info(`[Token Monitor] Estimated cost: $${totalCost.toFixed(6)} (Input: $${inputCost.toFixed(6)}, Output: $${outputCost.toFixed(6)})`);
     logger.info(`[Token Monitor] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   }
 
   /**
-   * Build OpenAI chat messages array
+   * Build Claude system prompt and user message
    * @private
    */
-  _buildChatMessages(messageText, context, senderInfo) {
-    const messages = [];
-
+  _buildClaudeMessages(messageText, context, senderInfo) {
     // 1. System prompt with Nova's personality
-    messages.push({
-      role: 'system',
-      content: NOVA_PROMPT
-    });
+    let systemPrompt = NOVA_PROMPT;
 
-    // 2. Context: Hourly notes (medium-term memory)
-    if (context.hourlyNotes.count > 0) {
-      const hourlyText = this._formatHourlyNotes(context.hourlyNotes.data);
-      messages.push({
-        role: 'system',
-        content: `# RECENT HOURLY SUMMARIES (Last ${context.hourlyNotes.hoursBack} hours)\n\n${hourlyText}`
-      });
-    }
+    // 2. Build user message with context using XML tags (Claude prefers this)
+    let userMessage = '';
 
-    // 3. Context: Recent messages (short-term memory - conversation flow)
+    // Add current date/time in Indonesia timezone
+    const now = new Date();
+    const jakartaOptions = {
+      timeZone: 'Asia/Jakarta',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      weekday: 'long',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    };
+    const dateTimeStr = now.toLocaleString('en-US', jakartaOptions);
+
+    userMessage += `<current_datetime>
+Today: ${dateTimeStr} WIB
+Use this to correct any outdated dates mentioned in messages or knowledge base.
+</current_datetime>
+
+`;
+
+    // Add Knowledge base context
     if (context.messages.count > 0) {
       const messagesText = this._formatRecentMessages(context.messages.data);
 
@@ -149,63 +158,44 @@ class ResponseGenerator {
                              context.messages.data[0].sender_name === 'Knowledge Base';
 
       if (isKnowledgeBase) {
-        messages.push({
-          role: 'system',
-          content: `# KNOWLEDGE BASE (CSV with 459 entries from 3,785+ messages)
-
+        userMessage += `<knowledge_base>
 Format: #id | date | topic | content | tags
 
 ${messagesText}
+</knowledge_base>
 
-Instructions: Use the retrieval rules and synthesis approach from your persona. Search across multiple rows, score matches, and cite row IDs in your response.`
-        });
+`;
       } else {
         const daysInfo = context.messages.daysBack ? `Last ${context.messages.daysBack} days` : 'All messages';
-        messages.push({
-          role: 'system',
-          content: `# CURRENT CONVERSATION (${daysInfo})\n\n${messagesText}`
-        });
+        userMessage += `<conversation_history period="${daysInfo}">
+${messagesText}
+</conversation_history>
+
+`;
       }
     }
 
-    // 4. Current message from user
+    // Add Today's raw messages (most recent context)
+    if (context.todaysRaw && context.todaysRaw.count > 0) {
+      const todaysText = this._formatTodaysRawMessages(context.todaysRaw.data);
+      userMessage += `<todays_messages>
+${todaysText}
+</todays_messages>
+
+<instructions>
+This is the most current context - prioritize today's messages when they contain newer information than the knowledge base.
+</instructions>
+
+`;
+    }
+
+    // Add current message from user
     const senderName = senderInfo.name || senderInfo.sender_name || 'User';
-    messages.push({
-      role: 'user',
-      content: `${senderName}: ${messageText}`
-    });
+    userMessage += `<current_query sender="${senderName}">
+${messageText}
+</current_query>`;
 
-    return messages;
-  }
-
-  /**
-   * Format hourly notes for context
-   * @private
-   */
-  _formatHourlyNotes(notes) {
-    return notes.map(note => {
-      const hour = new Date(note.hour_timestamp).toLocaleString('id-ID', {
-        hour: '2-digit',
-        minute: '2-digit',
-        day: 'numeric',
-        month: 'short'
-      });
-
-      const parts = [
-        `### ${hour}`,
-        note.summary_text
-      ];
-
-      if (note.key_decisions && note.key_decisions.length > 0) {
-        parts.push(`Decisions: ${note.key_decisions.join('; ')}`);
-      }
-
-      if (note.action_items && note.action_items.length > 0) {
-        parts.push(`Actions: ${note.action_items.join('; ')}`);
-      }
-
-      return parts.join('\n');
-    }).join('\n\n');
+    return { systemPrompt, userMessage };
   }
 
   /**
@@ -239,6 +229,27 @@ Instructions: Use the retrieval rules and synthesis approach from your persona. 
         minute: '2-digit',
         day: 'numeric',
         month: 'short'
+      });
+
+      let prefix = `[${time}] ${msg.sender_name}`;
+
+      if (msg.mentioned_nova) {
+        prefix += ' @Nova';
+      }
+
+      return `${prefix}: ${msg.message_text}`;
+    }).join('\n');
+  }
+
+  /**
+   * Format today's raw messages for context
+   * @private
+   */
+  _formatTodaysRawMessages(messages) {
+    return messages.map(msg => {
+      const time = new Date(msg.timestamp).toLocaleString('id-ID', {
+        hour: '2-digit',
+        minute: '2-digit'
       });
 
       let prefix = `[${time}] ${msg.sender_name}`;

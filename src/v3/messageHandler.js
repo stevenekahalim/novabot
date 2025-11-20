@@ -8,6 +8,9 @@ const logger = require('../utils/logger');
 const ContextLoader = require('./contextLoader');
 const ResponseGenerator = require('./responseGenerator');
 const MentionDetector = require('./mentionDetector');
+const ReminderParser = require('./reminderParser');
+const ReminderManager = require('./reminderManager');
+const pdfParse = require('pdf-parse');
 
 class MessageHandler {
   constructor(supabaseClient) {
@@ -15,6 +18,14 @@ class MessageHandler {
     this.contextLoader = new ContextLoader(supabaseClient);
     this.responseGenerator = new ResponseGenerator();
     this.mentionDetector = new MentionDetector();
+    this.reminderParser = new ReminderParser();
+    this.reminderManager = new ReminderManager(supabaseClient);
+
+    // Whitelist of approved chat IDs where Nova can respond
+    this.APPROVED_CHATS = [
+      '120363420201458845@g.us',  // Apex Sports Lab group
+      '62811393989@c.us'           // Steven Eka Halim (owner) private chat
+    ];
   }
 
   /**
@@ -39,8 +50,38 @@ class MessageHandler {
         return { shouldReply: false, response: null };
       }
 
-      // 2. Check if Nova should respond
-      const shouldRespond = this.mentionDetector.shouldRespond(message);
+      // 2. Check if chat is approved (whitelist filter)
+      if (!this.APPROVED_CHATS.includes(chatId)) {
+        logger.info(`[V3] Chat not in whitelist (${chatName}), ignoring`);
+        return { shouldReply: false, response: null };
+      }
+
+      // 3. Check for reminder requests (parse with AI if mentioned)
+      const isMentioned = this.mentionDetector.shouldRespond(message);
+      if (isMentioned) {
+        const reminderData = await this.reminderParser.parseReminder(
+          messageText,
+          message._data.notifyName || message.from,
+          chatId
+        );
+
+        if (reminderData) {
+          logger.info('[V3] ⏰ Reminder detected, saving to database');
+          const createdReminder = await this.reminderManager.createReminder(reminderData);
+
+          if (createdReminder) {
+            // Respond with confirmation
+            const confirmationMsg = this._formatReminderConfirmation(createdReminder);
+            return {
+              shouldReply: true,
+              response: confirmationMsg
+            };
+          }
+        }
+      }
+
+      // 4. Check if Nova should respond (regular conversation)
+      const shouldRespond = isMentioned;
 
       if (!shouldRespond) {
         logger.info('[V3] Not mentioned, staying silent');
@@ -49,15 +90,15 @@ class MessageHandler {
 
       logger.info('[V3] Mentioned or DM, generating response...');
 
-      // 3. Load full conversation context (ALWAYS from group chat - all 3,785 messages)
+      // 4. Load full conversation context (ALWAYS from group chat - all historical + today)
       const GROUP_CHAT_ID = '120363420201458845@g.us'; // Apex Sports Lab group
       const context = await this.contextLoader.loadFullContext(GROUP_CHAT_ID, {
         messageDaysBack: null,     // null = ALL messages (no date filter)
         messageLimit: null,        // null = no message count limit
-        hourlyNotesHoursBack: 24
+        includeTodaysRaw: true     // Include today's raw messages
       });
 
-      // 4. Generate response
+      // 5. Generate response
       const response = await this.responseGenerator.generate(
         messageText,
         context,
@@ -93,7 +134,7 @@ class MessageHandler {
       const chatName = chatContext.name || message.from;
       const senderName = message._data.notifyName || message.author || message.from;
       const senderNumber = message.author || message.from;
-      const messageText = message.body;
+      let messageText = message.body;
       const timestamp = new Date(message.timestamp * 1000); // WhatsApp timestamp is in seconds
 
       // Detect if Nova was mentioned
@@ -106,6 +147,19 @@ class MessageHandler {
       // Check for media
       const hasMedia = message.hasMedia || false;
       const mediaType = hasMedia ? message.type : null;
+
+      // Extract PDF content if this is a document
+      if (hasMedia && mediaType === 'document') {
+        const pdfText = await this._extractPDFContent(message);
+        if (pdfText) {
+          // Append PDF content to message text (preserve caption if exists)
+          const caption = messageText || '';
+          messageText = caption
+            ? `${caption}\n\n[PDF CONTENT]\n${pdfText}`
+            : `[PDF CONTENT]\n${pdfText}`;
+          logger.info(`[V3] Extracted ${pdfText.length} characters from PDF`);
+        }
+      }
 
       const messageData = {
         message_text: messageText,
@@ -194,6 +248,97 @@ class MessageHandler {
       logger.error('[V3] Error getting active participants:', error);
       return [];
     }
+  }
+
+  /**
+   * Extract text content from PDF attachment
+   * @private
+   * @param {Object} message - WhatsApp message with PDF attachment
+   * @returns {string|null} Extracted text or null if extraction failed
+   */
+  async _extractPDFContent(message) {
+    try {
+      // Download media from WhatsApp
+      logger.info('[V3] Downloading PDF attachment...');
+      const media = await message.downloadMedia();
+
+      if (!media || !media.data) {
+        logger.warn('[V3] No media data available');
+        return null;
+      }
+
+      // Check if this is actually a PDF
+      const mimeType = media.mimetype || '';
+      if (!mimeType.includes('pdf')) {
+        logger.info(`[V3] Not a PDF (mimetype: ${mimeType}), skipping extraction`);
+        return null;
+      }
+
+      // Convert base64 to buffer
+      const pdfBuffer = Buffer.from(media.data, 'base64');
+
+      // Check file size (skip if > 10MB to avoid memory issues)
+      const fileSizeInMB = pdfBuffer.length / (1024 * 1024);
+      if (fileSizeInMB > 10) {
+        logger.warn(`[V3] PDF too large (${fileSizeInMB.toFixed(2)}MB), skipping extraction`);
+        return `[PDF file: ${media.filename || 'document.pdf'} - ${fileSizeInMB.toFixed(2)}MB - Too large to extract]`;
+      }
+
+      // Extract text using pdf-parse
+      logger.info('[V3] Parsing PDF content...');
+      const pdfData = await pdfParse(pdfBuffer);
+
+      const extractedText = pdfData.text.trim();
+      const pageCount = pdfData.numpages;
+
+      if (!extractedText || extractedText.length < 10) {
+        logger.warn('[V3] PDF appears to be empty or scanned image (no text found)');
+        return `[PDF file: ${media.filename || 'document.pdf'} - ${pageCount} pages - No extractable text (may be scanned image)]`;
+      }
+
+      // Limit text length to avoid database issues (max 50K characters)
+      const maxLength = 50000;
+      const finalText = extractedText.length > maxLength
+        ? extractedText.substring(0, maxLength) + '\n\n[... PDF truncated at 50K characters ...]'
+        : extractedText;
+
+      logger.info(`[V3] Successfully extracted ${finalText.length} characters from ${pageCount}-page PDF`);
+      return `[PDF: ${media.filename || 'document.pdf'} - ${pageCount} pages]\n\n${finalText}`;
+
+    } catch (error) {
+      logger.error('[V3] Error extracting PDF content:', error.message);
+      return `[PDF extraction failed: ${error.message}]`;
+    }
+  }
+
+  /**
+   * Format reminder confirmation message
+   * @private
+   * @param {Object} reminder - Created reminder object
+   * @returns {string} Confirmation message
+   */
+  _formatReminderConfirmation(reminder) {
+    const date = new Date(reminder.reminder_date + 'T' + reminder.reminder_time + '+07:00');
+    const formattedDate = date.toLocaleDateString('id-ID', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      timeZone: 'Asia/Jakarta'
+    });
+    const formattedTime = date.toLocaleTimeString('id-ID', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Jakarta'
+    });
+
+    return `✅ *Reminder Set!*\n\n` +
+           `📌 For: ${reminder.assigned_to}\n` +
+           `📅 When: ${formattedDate}\n` +
+           `⏰ Time: ${formattedTime} WIB\n` +
+           `💬 Message: ${reminder.message}\n\n` +
+           `_I'll remind them at the scheduled time_`;
   }
 }
 
